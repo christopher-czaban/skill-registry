@@ -1,0 +1,106 @@
+name: Published PyPI smoke
+
+on:
+  push:
+    branches:
+      - codex/pypi-0.1.0-linux-smoke
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Clean-index bootstrap (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.11.33"
+          enable-cache: false
+
+      - name: Verify published package without a source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          smoke_root="$RUNNER_TEMP/agent-skill-registry-pypi-smoke"
+          instance="$smoke_root/instance"
+          export HOME="$smoke_root/home"
+          export XDG_CONFIG_HOME="$smoke_root/xdg"
+          export UV_TOOL_DIR="$smoke_root/tools"
+          export UV_TOOL_BIN_DIR="$smoke_root/bin"
+          export UV_CACHE_DIR="$smoke_root/bootstrap-cache"
+          unset PYTHONPATH SKILL_REGISTRY_ROOT UV_FIND_LINKS
+          unset UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL
+
+          uvx --refresh --from agent-skill-registry==0.1.0 \
+            skill-registry init "$instance" --target codex --target agents
+
+          grep -F '"agent-skill-registry==0.1.0"' "$instance/pyproject.toml"
+
+          export UV_CACHE_DIR="$smoke_root/instance-cache"
+          cd "$instance"
+          uv sync
+          uv sync --frozen
+
+          grep -F 'name = "agent-skill-registry"' uv.lock
+          grep -F 'source = { registry = "https://pypi.org/simple" }' uv.lock
+          uv run --frozen skill-registry validate
+
+          installed_version="$(uv run --frozen python -c \
+            "import importlib.metadata; print(importlib.metadata.version('agent-skill-registry'))")"
+          test "$installed_version" = "0.1.0"
+
+          module_path="$(uv run --frozen python -c \
+            'import pathlib, skill_registry; print(pathlib.Path(skill_registry.__file__).resolve())')"
+          case "$module_path" in
+            "$instance"/.venv/*) ;;
+            *)
+              echo "Unexpected module path: $module_path" >&2
+              exit 1
+              ;;
+          esac
+
+          test ! -e "$instance/.venv/bin/agent-skill-registry"
+
+          mkdir -p skills/example-skill
+          printf '%s\n' \
+            '---' \
+            'name: example-skill' \
+            'description: Neutral Ubuntu release smoke-test skill.' \
+            '---' \
+            '' \
+            '# Example Skill' \
+            > skills/example-skill/SKILL.md
+          printf '%s\n' \
+            'id: example-skill' \
+            'title: Example Skill' \
+            'targets:' \
+            '  - codex' \
+            > skills/example-skill/skill.yaml
+
+          uv run --frozen skill-registry validate
+          uv run --frozen skill-registry discover --target codex
+          uv run --frozen skill-registry deploy --dry-run \
+            --target codex --skill example-skill
+          uv run --frozen skill-registry deploy \
+            --target codex --skill example-skill \
+            --deployed-by "GitHub Actions" \
+            --reason "Verify published 0.1.0 package on Ubuntu"
+          uv run --frozen skill-registry status \
+            --target codex --skill example-skill
+          uv run --frozen skill-registry doctor \
+            --target codex --skill example-skill
+          uv run --frozen skill-registry guard check \
+            --operation edit --path "$instance/skills/example-skill/SKILL.md"
+
+          if uv run --frozen skill-registry guard check \
+            --operation edit \
+            --path "$HOME/.codex/skills/example-skill/SKILL.md"; then
+            echo "Expected the deployed-copy guard check to block" >&2
+            exit 1
+          fi
+
+          test -L "$HOME/.codex/skills/example-skill"
