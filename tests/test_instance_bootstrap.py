@@ -34,7 +34,7 @@ from skill_registry.validation import Diagnostic, ValidationResult, validate_reg
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEST_ENGINE = EngineDistribution("skill-registry", "9.8.7")
+TEST_ENGINE = EngineDistribution("agent-skill-registry", "9.8.7")
 PRESET_EXPECTATIONS = {
     "codex": ("codex", "~/.codex/skills", "~/.codex/skill-registry-state", "codex-desktop"),
     "claude-code": (
@@ -76,7 +76,7 @@ class InstanceBootstrapTests(unittest.TestCase):
     def test_project_name_cannot_shadow_engine_distribution(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
-            root = base / "skill_registry"
+            root = base / "agent_skill_registry"
             with self.assertRaisesRegex(BootstrapError, "conflicts with the engine distribution"):
                 initialize_registry_instance(
                     root,
@@ -90,13 +90,13 @@ class InstanceBootstrapTests(unittest.TestCase):
         distribution = SimpleNamespace(metadata={"Name": "Canonical-Engine"}, version="2.4.6")
         with patch("skill_registry.bootstrap.importlib.metadata.distribution", return_value=distribution) as lookup:
             identity = installed_engine_distribution()
-        lookup.assert_called_once_with("skill-registry")
+        lookup.assert_called_once_with("agent-skill-registry")
         self.assertEqual(identity, EngineDistribution("Canonical-Engine", "2.4.6"))
 
     def test_missing_or_incomplete_distribution_metadata_is_actionable(self) -> None:
         with patch(
             "skill_registry.bootstrap.importlib.metadata.distribution",
-            side_effect=bootstrap.importlib.metadata.PackageNotFoundError("skill-registry"),
+            side_effect=bootstrap.importlib.metadata.PackageNotFoundError("agent-skill-registry"),
         ):
             with self.assertRaisesRegex(BootstrapError, "metadata was not found"):
                 installed_engine_distribution()
@@ -122,7 +122,7 @@ class InstanceBootstrapTests(unittest.TestCase):
 
         self.assertIn('name = "customer-skills"', pyproject)
         self.assertIn('requires-python = ">=3.9"', pyproject)
-        self.assertIn('"skill-registry==9.8.7"', pyproject)
+        self.assertIn('"agent-skill-registry==9.8.7"', pyproject)
         self.assertIn("[tool.uv]\npackage = false", pyproject)
         self.assertNotIn("[build-system]", pyproject)
         self.assertNotIn("[tool.uv.sources]", pyproject)
@@ -1255,7 +1255,7 @@ class BootstrapCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("root:", result.stdout)
         self.assertIn("name: registry", result.stdout)
-        self.assertIn("engine: skill-registry==", result.stdout)
+        self.assertIn("engine: agent-skill-registry==", result.stdout)
         self.assertIn("targets: (none)", result.stdout)
         self.assertIn("uv sync", result.stdout)
         self.assertIn("uv run skill-registry validate", result.stdout)

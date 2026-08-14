@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
 
 from skill_registry.bootstrap import installed_engine_distribution
@@ -68,6 +71,38 @@ class PackageArtifactTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls._temporary.cleanup()
 
+    def test_artifact_names_metadata_and_console_script_match_distribution_contract(self) -> None:
+        self.assertEqual(self.wheel.name, "agent_skill_registry-0.1.0-py3-none-any.whl")
+        self.assertEqual(self.sdist.name, "agent_skill_registry-0.1.0.tar.gz")
+
+        with zipfile.ZipFile(self.wheel) as archive:
+            metadata_members = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            entry_point_members = [
+                name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt")
+            ]
+            self.assertEqual(len(metadata_members), 1)
+            self.assertEqual(len(entry_point_members), 1)
+            metadata = BytesParser(policy=default).parsebytes(archive.read(metadata_members[0]))
+            entry_points = configparser.ConfigParser()
+            entry_points.read_string(archive.read(entry_point_members[0]).decode("utf-8"))
+
+        self.assertEqual(metadata["Name"], "agent-skill-registry")
+        self.assertEqual(metadata["Version"], "0.1.0")
+        self.assertEqual(metadata["Requires-Python"], ">=3.9")
+        self.assertEqual(
+            set(metadata.get_all("Project-URL", [])),
+            {
+                "Homepage, https://github.com/christopher-czaban/skill-registry",
+                "Documentation, https://github.com/christopher-czaban/skill-registry#readme",
+                "Issues, https://github.com/christopher-czaban/skill-registry/issues",
+                "Source, https://github.com/christopher-czaban/skill-registry",
+            },
+        )
+        self.assertEqual(
+            dict(entry_points["console_scripts"]),
+            {"skill-registry": "skill_registry.cli:main"},
+        )
+
     def test_wheel_contains_every_registry_instance_resource(self) -> None:
         with zipfile.ZipFile(self.wheel) as archive:
             names = set(archive.namelist())
@@ -112,6 +147,7 @@ class PackageArtifactTests(unittest.TestCase):
         )
         self.assertEqual(install.returncode, 0, install.stderr + install.stdout)
         bootstrap_cli = bootstrap_venv / "bin" / "skill-registry"
+        self.assertFalse((bootstrap_venv / "bin" / "agent-skill-registry").exists())
 
         help_result = subprocess.run(
             [str(bootstrap_cli), "--help"],
@@ -144,7 +180,14 @@ class PackageArtifactTests(unittest.TestCase):
             timeout=180,
         )
         self.assertEqual(init.returncode, 0, init.stderr + init.stdout)
-        self.assertTrue(json.loads(init.stdout)["ok"])
+        init_payload = json.loads(init.stdout)
+        self.assertTrue(init_payload["ok"])
+        self.assertEqual(init_payload["engine_distribution"], "agent-skill-registry")
+        self.assertEqual(init_payload["engine_version"], "0.1.0")
+        self.assertIn(
+            '"agent-skill-registry==0.1.0"',
+            (generated / "pyproject.toml").read_text(encoding="utf-8"),
+        )
         assert_no_development_source(generated)
         self.assertFalse((generated / "uv.lock").exists())
         self.assertTrue((generated / "skill-sets.yaml").is_file())
@@ -273,7 +316,7 @@ class PackageArtifactTests(unittest.TestCase):
                 "-c",
                 (
                     "import importlib.metadata, pathlib, skill_registry; "
-                    "print(importlib.metadata.version('skill-registry')); "
+                    "print(importlib.metadata.version('agent-skill-registry')); "
                     "print(pathlib.Path(skill_registry.__file__).resolve())"
                 ),
             ],

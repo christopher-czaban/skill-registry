@@ -15,7 +15,7 @@ do not need to clone the engine source.
 Create a registry instance with one or more generic target presets:
 
 ```sh
-uvx --from skill-registry skill-registry init ./my-agent-skills \
+uvx --from agent-skill-registry==0.1.0 skill-registry init ./my-agent-skills \
   --target codex \
   --target agents
 cd ./my-agent-skills

@@ -28,7 +28,7 @@ from .root import (
 from .validation import validate_registry
 
 
-ENGINE_DISTRIBUTION = "skill-registry"
+ENGINE_DISTRIBUTION = "agent-skill-registry"
 SUPPORTED_TARGET_PRESETS = (
     "codex",
     "claude-code",

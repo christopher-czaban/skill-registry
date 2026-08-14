@@ -1,6 +1,16 @@
 # Releasing
 
-Phase 4 prepares the release path but does not publish version `0.1.0`.
+Version `0.1.0` must be published as the `agent-skill-registry` distribution from
+the `christopher-czaban/skill-registry` repository. It installs the
+`skill_registry` Python package and the sole CLI command `skill-registry`.
+
+The expected distribution files are
+`agent_skill_registry-0.1.0-py3-none-any.whl` and
+`agent_skill_registry-0.1.0.tar.gz`. A clean, exactly pinned bootstrap uses:
+
+```sh
+uvx --from agent-skill-registry==0.1.0 skill-registry init ./my-agent-skills
+```
 
 ## Candidate procedure
 
@@ -25,16 +35,18 @@ bound to the protected GitHub environment named `pypi`, and only that job gets
 `id-token: write`. Publication uses PyPI Trusted Publishing; no API token or
 password fallback is supported.
 
-The orchestrator will configure environment protection and the pending or
-active PyPI publisher only after local and public-repository review. The first
-TestPyPI or isolated candidate proof, first PyPI publication, and clean install
-verification belong to Phase 5.
+The pending or active PyPI publisher must use project
+`agent-skill-registry`, owner `christopher-czaban`, repository
+`skill-registry`, workflow `release.yml`, and environment `pypi`. Configure it
+only after local and public-repository review. The first isolated candidate
+proof, first PyPI publication, and clean install verification belong to Phase
+5; TestPyPI remains a contingency rather than a permanent publishing mode.
 
 ## Failure and rollback
 
 If tests, hygiene, metadata, tag validation, or installed-wheel verification
 fails, do not publish. If a defective release is published, stop further
-promotion, document impact, publish a corrected version when safe, and yank
-the defective version when leaving it installable would harm users. Published
-files are immutable and must never be silently replaced under the same
-version.
+promotion, document impact, publish a corrected version such as `0.1.1` when
+safe, and yank the defective version when leaving it installable would harm
+users. Published files are immutable and must never be silently replaced
+under the same version.

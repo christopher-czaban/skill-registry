@@ -4,7 +4,7 @@
 
 Skill Registry separates reusable execution code from user-owned content.
 
-The `skill-registry` distribution supplies the `skill_registry` Python package,
+The `agent-skill-registry` distribution supplies the `skill_registry` Python package,
 the CLI, and minimal instance templates. A registry instance supplies
 `registry.yaml`, canonical `skills/`, target and runtime catalogs, optional
 skill sets, local overrides, and generated state. The engine never searches

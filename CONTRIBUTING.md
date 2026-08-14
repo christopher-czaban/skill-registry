@@ -27,8 +27,8 @@ package formats:
 uv run --frozen python scripts/check_public_hygiene.py --root .
 uv build --wheel --sdist --out-dir dist
 uv run --frozen python scripts/check_public_hygiene.py --root . \
-  --artifact dist/skill_registry-0.1.0-py3-none-any.whl \
-  --artifact dist/skill_registry-0.1.0.tar.gz
+  --artifact dist/agent_skill_registry-0.1.0-py3-none-any.whl \
+  --artifact dist/agent_skill_registry-0.1.0.tar.gz
 ```
 
 Do not add user skills, real target paths, local profiles, credentials,
