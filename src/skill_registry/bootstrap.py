@@ -654,10 +654,7 @@ def _publish_staging(staging: Path, destination: Path, state: _DestinationState)
 
         for source_file in sorted(item for item in staging.rglob("*") if item.is_file()):
             published_file = destination / source_file.relative_to(staging)
-            with source_file.open("rb") as source:
-                with published_file.open("xb") as target:
-                    entries.append(_capture_open_file_entry(published_file, target))
-                    _copy_file(source, target)
+            _publish_file(source_file, published_file, destination, entries)
 
         publication_directories.rmdir()
     except BootstrapError as exc:
@@ -701,11 +698,79 @@ def _copy_file(source: BinaryIO, target: BinaryIO) -> None:
     os.fsync(target.fileno())
 
 
-def _capture_open_file_entry(path: Path, target: BinaryIO) -> _PublishedEntry:
-    metadata = os.fstat(target.fileno())
-    if not stat.S_ISREG(metadata.st_mode):
-        raise BootstrapError(f"Exclusive publication handle is not a regular file: {path}")
-    descriptor = _retain_ownership_descriptor(target.fileno())
+def _publish_file(
+    source_path: Path,
+    published_path: Path,
+    destination_root: Path,
+    ownership_ledger: list[_PublishedEntry],
+) -> None:
+    try:
+        quarantine = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination_root.name}.skill-registry-file-acquisition-",
+                dir=str(destination_root.parent),
+            )
+        )
+    except OSError as exc:
+        raise BootstrapError(
+            f"Could not create same-filesystem file-acquisition quarantine before publishing "
+            f"{published_path}: {exc}"
+        ) from exc
+
+    target: BinaryIO | None = None
+    primary_error: BootstrapError | OSError | None = None
+    close_error: OSError | None = None
+    try:
+        with source_path.open("rb") as source:
+            try:
+                target = published_path.open("xb")
+                entry = _capture_open_file_entry(published_path, target, quarantine / "entry")
+                ownership_ledger.append(entry)
+                _copy_file(source, target)
+            except (BootstrapError, OSError) as exc:
+                primary_error = exc
+            finally:
+                if target is not None:
+                    try:
+                        _close_open_publication_file(target, published_path)
+                    except OSError as exc:
+                        close_error = exc
+    except OSError as exc:
+        if primary_error is None:
+            primary_error = exc
+
+    quarantine_error = _remove_empty_file_acquisition_quarantine(quarantine)
+    if primary_error is not None and close_error is None and not quarantine_error:
+        raise primary_error
+
+    errors: list[str] = []
+    if primary_error is not None:
+        errors.append(str(primary_error))
+    if close_error is not None:
+        errors.append(f"Could not close exclusive publication handle for {published_path}: {close_error}")
+    if quarantine_error:
+        errors.append(quarantine_error)
+    if errors:
+        raise BootstrapError("; ".join(errors)) from (primary_error or close_error)
+
+
+def _capture_open_file_entry(
+    path: Path,
+    target: BinaryIO,
+    quarantined_path: Path,
+) -> _PublishedEntry:
+    try:
+        metadata = os.fstat(target.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise BootstrapError(f"Exclusive publication handle is not a regular file: {path}")
+        descriptor = _retain_ownership_descriptor(target.fileno())
+    except (BootstrapError, OSError) as exc:
+        recovery_error = _rollback_unledgered_open_file(path, target, quarantined_path)
+        message = f"Could not acquire publication ownership handle for {path}: {exc}"
+        if recovery_error:
+            message = f"{message}; acquisition rollback also failed: {recovery_error}"
+        raise BootstrapError(message) from exc
+
     return _PublishedEntry(
         path=path,
         device=metadata.st_dev,
@@ -713,6 +778,78 @@ def _capture_open_file_entry(path: Path, target: BinaryIO) -> _PublishedEntry:
         is_directory=False,
         descriptor=descriptor,
     )
+
+
+def _rollback_unledgered_open_file(
+    path: Path,
+    target: BinaryIO,
+    quarantined_path: Path,
+) -> str:
+    try:
+        _quarantine_public_path(path, quarantined_path)
+    except FileNotFoundError:
+        return ""
+    except (BootstrapError, OSError) as exc:
+        return f"could not atomically quarantine unledgered publication file {path}: {exc}"
+
+    try:
+        quarantined_metadata = quarantined_path.lstat()
+    except OSError as exc:
+        restoration_error = _restore_quarantined_path(quarantined_path, path, None)
+        message = f"could not inspect quarantined unledgered publication file for {path}: {exc}"
+        if restoration_error:
+            message = f"{message}; {restoration_error}"
+        return message
+
+    try:
+        owned_metadata = os.fstat(target.fileno())
+    except OSError as exc:
+        restoration_error = _restore_quarantined_path(quarantined_path, path, quarantined_metadata)
+        message = f"could not prove ownership from the open publication handle for {path}: {exc}"
+        if restoration_error:
+            message = f"{message}; {restoration_error}"
+        else:
+            message = f"{message}; entry restored without overwrite"
+        return message
+
+    if (
+        not stat.S_ISREG(owned_metadata.st_mode)
+        or quarantined_metadata.st_dev != owned_metadata.st_dev
+        or quarantined_metadata.st_ino != owned_metadata.st_ino
+    ):
+        restoration_error = _restore_quarantined_path(quarantined_path, path, quarantined_metadata)
+        message = f"refused to remove changed unledgered publication file {path}"
+        if restoration_error:
+            message = f"{message}; {restoration_error}"
+        else:
+            message = f"{message}; foreign object restored without overwrite"
+        return message
+
+    try:
+        quarantined_path.unlink()
+    except OSError as exc:
+        restoration_error = _restore_quarantined_path(quarantined_path, path, quarantined_metadata)
+        message = f"could not remove quarantined owned publication file for {path}: {exc}"
+        if restoration_error:
+            message = f"{message}; {restoration_error}"
+        else:
+            message = f"{message}; entry restored without overwrite"
+        return message
+    return ""
+
+
+def _close_open_publication_file(target: BinaryIO, _path: Path) -> None:
+    target.close()
+
+
+def _remove_empty_file_acquisition_quarantine(quarantine: Path) -> str:
+    try:
+        quarantine.rmdir()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return f"file-acquisition quarantine retained at {quarantine}: {exc}"
+    return ""
 
 
 def _retain_ownership_descriptor(descriptor: int) -> int:

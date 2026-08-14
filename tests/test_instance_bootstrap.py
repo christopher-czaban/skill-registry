@@ -364,6 +364,231 @@ class InstanceBootstrapTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertFalse(any(base.glob(".registry.skill-registry-init-*")))
 
+    def test_file_ownership_acquisition_failures_are_transactional(self) -> None:
+        for failure in ("fstat", "dup"):
+            for caller_owned_root in (False, True):
+                for substitute_foreign in (False, True):
+                    with self.subTest(
+                        failure=failure,
+                        caller_owned_root=caller_owned_root,
+                        substitute_foreign=substitute_foreign,
+                    ):
+                        self._assert_file_ownership_acquisition_failure(
+                            failure,
+                            caller_owned_root=caller_owned_root,
+                            substitute_foreign=substitute_foreign,
+                        )
+
+    def _assert_file_ownership_acquisition_failure(
+        self,
+        failure: str,
+        *,
+        caller_owned_root: bool,
+        substitute_foreign: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "registry"
+            caller_inode: int | None = None
+            if caller_owned_root:
+                root.mkdir()
+                caller_inode = root.stat().st_ino
+
+            original_capture = bootstrap._capture_open_file_entry
+            original_fstat = os.fstat
+            original_retain = bootstrap._retain_ownership_descriptor
+            target_descriptors: list[int] = []
+            failed = False
+            foreign_inode: int | None = None
+
+            def fail_during_capture(path: Path, target, *args) -> bootstrap._PublishedEntry:
+                nonlocal failed, foreign_inode
+                if path.name != ".gitignore" or failed:
+                    return original_capture(path, target, *args)
+
+                descriptor = target.fileno()
+                target_descriptors.append(descriptor)
+                if substitute_foreign:
+                    path.unlink()
+                    path.write_text("foreign acquisition replacement\n", encoding="utf-8")
+                    foreign_inode = path.stat().st_ino
+
+                if failure == "fstat":
+                    def fail_first_target_fstat(selected: int) -> os.stat_result:
+                        nonlocal failed
+                        if selected == descriptor and not failed:
+                            failed = True
+                            raise OSError(errno.EMFILE, "ownership fstat denied")
+                        return original_fstat(selected)
+
+                    with patch("skill_registry.bootstrap.os.fstat", side_effect=fail_first_target_fstat):
+                        return original_capture(path, target, *args)
+
+                failed = True
+                with patch(
+                    "skill_registry.bootstrap._retain_ownership_descriptor",
+                    side_effect=OSError(errno.EMFILE, "ownership dup denied"),
+                ):
+                    return original_capture(path, target, *args)
+
+            with patch(
+                "skill_registry.bootstrap._capture_open_file_entry",
+                side_effect=fail_during_capture,
+            ):
+                with self.assertRaises(BootstrapError) as raised:
+                    initialize_registry_instance(
+                        root,
+                        environ=isolated_environment(base),
+                        cwd=base,
+                        engine_identity=TEST_ENGINE,
+                    )
+
+            self.assertTrue(failed)
+            self.assertIn("Could not acquire publication ownership handle", str(raised.exception))
+            self.assertTrue(target_descriptors)
+            for descriptor in target_descriptors:
+                with self.assertRaises(OSError) as closed:
+                    original_fstat(descriptor)
+                self.assertEqual(closed.exception.errno, errno.EBADF)
+
+            if substitute_foreign:
+                foreign = root / ".gitignore"
+                self.assertEqual(foreign.stat().st_ino, foreign_inode)
+                self.assertEqual(
+                    foreign.read_text(encoding="utf-8"),
+                    "foreign acquisition replacement\n",
+                )
+                self.assertEqual([path.name for path in root.iterdir()], [".gitignore"])
+            elif caller_owned_root:
+                self.assertEqual(root.stat().st_ino, caller_inode)
+                self.assertEqual(list(root.iterdir()), [])
+            else:
+                self.assertFalse(root.exists())
+
+            if caller_inode is not None:
+                self.assertEqual(root.stat().st_ino, caller_inode)
+            self.assertEqual(list(base.glob(".registry.skill-registry-file-acquisition-*")), [])
+
+    def test_file_ownership_acquisition_restore_collision_preserves_both_foreign_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "registry"
+            root.mkdir()
+            root_inode = root.stat().st_ino
+            original_capture = bootstrap._capture_open_file_entry
+            original_restore = bootstrap._restore_quarantined_path
+            target_descriptor: int | None = None
+            collided = False
+
+            def substitute_then_fail(path: Path, target, *args) -> bootstrap._PublishedEntry:
+                nonlocal target_descriptor
+                if path.name != ".gitignore":
+                    return original_capture(path, target, *args)
+                target_descriptor = target.fileno()
+                path.unlink()
+                path.write_text("foreign quarantined file\n", encoding="utf-8")
+                with patch(
+                    "skill_registry.bootstrap._retain_ownership_descriptor",
+                    side_effect=OSError(errno.EMFILE, "ownership dup denied"),
+                ):
+                    return original_capture(path, target, *args)
+
+            def collide_before_restore(
+                quarantined_path: Path,
+                public_path: Path,
+                expected: os.stat_result | None,
+            ) -> str:
+                nonlocal collided
+                if public_path.name == ".gitignore" and not collided:
+                    collided = True
+                    public_path.write_text("foreign public collision\n", encoding="utf-8")
+                return original_restore(quarantined_path, public_path, expected)
+
+            with patch(
+                "skill_registry.bootstrap._capture_open_file_entry",
+                side_effect=substitute_then_fail,
+            ), patch(
+                "skill_registry.bootstrap._restore_quarantined_path",
+                side_effect=collide_before_restore,
+            ):
+                with self.assertRaises(BootstrapError) as raised:
+                    initialize_registry_instance(
+                        root,
+                        environ=isolated_environment(base),
+                        cwd=base,
+                        engine_identity=TEST_ENGINE,
+                    )
+
+            quarantine = next(base.glob(".registry.skill-registry-file-acquisition-*"))
+            quarantined_file = quarantine / "entry"
+            self.assertTrue(collided)
+            self.assertIn("could not restore", str(raised.exception))
+            self.assertIn(f"preserved at {quarantined_file}", str(raised.exception))
+            self.assertIn("file-acquisition quarantine retained", str(raised.exception))
+            self.assertEqual(root.stat().st_ino, root_inode)
+            self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "foreign public collision\n")
+            self.assertEqual(quarantined_file.read_text(encoding="utf-8"), "foreign quarantined file\n")
+            self.assertIsNotNone(target_descriptor)
+            with self.assertRaises(OSError) as closed:
+                os.fstat(target_descriptor)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+
+    def test_file_ownership_acquisition_reports_target_close_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "registry"
+            original_capture = bootstrap._capture_open_file_entry
+            original_fstat = os.fstat
+            original_close = bootstrap._close_open_publication_file
+            target_descriptor: int | None = None
+            failed = False
+
+            def fail_initial_fstat(path: Path, target, *args) -> bootstrap._PublishedEntry:
+                nonlocal target_descriptor, failed
+                if path.name != ".gitignore":
+                    return original_capture(path, target, *args)
+                target_descriptor = target.fileno()
+
+                def fail_once(selected: int) -> os.stat_result:
+                    nonlocal failed
+                    if selected == target_descriptor and not failed:
+                        failed = True
+                        raise OSError(errno.EMFILE, "ownership fstat denied")
+                    return original_fstat(selected)
+
+                with patch("skill_registry.bootstrap.os.fstat", side_effect=fail_once):
+                    return original_capture(path, target, *args)
+
+            def close_then_fail(target, path: Path) -> None:
+                original_close(target, path)
+                raise OSError(errno.EIO, "target close denied")
+
+            with patch(
+                "skill_registry.bootstrap._capture_open_file_entry",
+                side_effect=fail_initial_fstat,
+            ), patch(
+                "skill_registry.bootstrap._close_open_publication_file",
+                side_effect=close_then_fail,
+            ):
+                with self.assertRaises(BootstrapError) as raised:
+                    initialize_registry_instance(
+                        root,
+                        environ=isolated_environment(base),
+                        cwd=base,
+                        engine_identity=TEST_ENGINE,
+                    )
+
+            message = str(raised.exception)
+            self.assertIn("ownership fstat denied", message)
+            self.assertIn("Could not close exclusive publication handle", message)
+            self.assertIn("target close denied", message)
+            self.assertFalse(root.exists())
+            self.assertIsNotNone(target_descriptor)
+            with self.assertRaises(OSError) as closed:
+                original_fstat(target_descriptor)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+            self.assertEqual(list(base.glob(".registry.skill-registry-file-acquisition-*")), [])
+
     def test_file_substitution_before_descriptor_capture_preserves_foreign_file_for_absent_destination(self) -> None:
         self._assert_file_substitution_preserved(caller_owned_root=False)
 
@@ -393,14 +618,14 @@ class InstanceBootstrapTests(unittest.TestCase):
             foreign_inode: int | None = None
             substituted = False
 
-            def substitute_then_capture(path: Path, target) -> bootstrap._PublishedEntry:
+            def substitute_then_capture(path: Path, target, *args) -> bootstrap._PublishedEntry:
                 nonlocal foreign_inode, substituted
                 if path.name == "registry.yaml" and not substituted:
                     substituted = True
                     path.unlink()
                     path.write_text("version: 1\n", encoding="utf-8")
                     foreign_inode = path.stat().st_ino
-                return original_capture(path, target)
+                return original_capture(path, target, *args)
 
             with patch("skill_registry.bootstrap._capture_open_file_entry", side_effect=substitute_then_capture):
                 with self.assertRaisesRegex(BootstrapError, "changed during publication"):
