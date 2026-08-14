@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -542,13 +543,29 @@ class InstanceBootstrapTests(unittest.TestCase):
                 target = root
 
             original_quarantine = bootstrap._quarantine_public_path
+            original_retain = bootstrap._retain_ownership_descriptor
+            retained_descriptors: list[int] = []
             foreign_inode: int | None = None
             substituted = False
+
+            def track_retained_descriptor(descriptor: int) -> int:
+                retained = original_retain(descriptor)
+                retained_descriptors.append(retained)
+                return retained
 
             def substitute_then_quarantine(source: Path, destination: Path) -> None:
                 nonlocal foreign_inode, substituted
                 if source == target and not substituted:
                     substituted = True
+                    source_metadata = source.lstat()
+                    self.assertTrue(
+                        any(
+                            metadata.st_dev == source_metadata.st_dev
+                            and metadata.st_ino == source_metadata.st_ino
+                            for metadata in (os.fstat(descriptor) for descriptor in retained_descriptors)
+                        ),
+                        f"no retained ownership descriptor for {source}",
+                    )
                     if kind == "file":
                         source.unlink()
                         source.write_text("foreign rollback file\n", encoding="utf-8")
@@ -560,6 +577,10 @@ class InstanceBootstrapTests(unittest.TestCase):
                 original_quarantine(source, destination)
 
             with patch("skill_registry.bootstrap.validate_registry", side_effect=(valid, invalid)), \
+                patch(
+                    "skill_registry.bootstrap._retain_ownership_descriptor",
+                    side_effect=track_retained_descriptor,
+                ), \
                 patch(
                     "skill_registry.bootstrap._quarantine_public_path",
                     side_effect=substitute_then_quarantine,
@@ -584,6 +605,52 @@ class InstanceBootstrapTests(unittest.TestCase):
             if caller_inode is not None:
                 self.assertEqual(root.stat().st_ino, caller_inode)
             self.assertEqual(list(base.glob(".registry.skill-registry-rollback-*")), [])
+
+    def test_publication_ownership_descriptors_close_on_success_and_rollback(self) -> None:
+        valid = ValidationResult(())
+        invalid = ValidationResult((Diagnostic("error", "test_error", "force rollback"),))
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                root = base / "registry"
+                retained_descriptors: list[int] = []
+                original_retain = bootstrap._retain_ownership_descriptor
+
+                def track_retained_descriptor(descriptor: int) -> int:
+                    retained = original_retain(descriptor)
+                    retained_descriptors.append(retained)
+                    return retained
+
+                validation = (
+                    patch("skill_registry.bootstrap.validate_registry", side_effect=(valid, invalid))
+                    if rollback
+                    else patch("skill_registry.bootstrap.validate_registry", return_value=valid)
+                )
+                with validation, patch(
+                    "skill_registry.bootstrap._retain_ownership_descriptor",
+                    side_effect=track_retained_descriptor,
+                ):
+                    if rollback:
+                        with self.assertRaisesRegex(BootstrapError, "Published registry instance failed validation"):
+                            initialize_registry_instance(
+                                root,
+                                environ=isolated_environment(base),
+                                cwd=base,
+                                engine_identity=TEST_ENGINE,
+                            )
+                    else:
+                        initialize_registry_instance(
+                            root,
+                            environ=isolated_environment(base),
+                            cwd=base,
+                            engine_identity=TEST_ENGINE,
+                        )
+
+                self.assertTrue(retained_descriptors)
+                for descriptor in retained_descriptors:
+                    with self.assertRaises(OSError) as raised:
+                        os.fstat(descriptor)
+                    self.assertEqual(raised.exception.errno, errno.EBADF)
 
     def test_created_root_post_rename_probe_failure_uses_immediate_ownership_ledger(self) -> None:
         self._assert_post_rename_probe_failure(caller_owned_root=False, fail_root=True)

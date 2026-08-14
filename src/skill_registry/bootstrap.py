@@ -80,6 +80,7 @@ class _PublishedEntry:
     device: int
     inode: int
     is_directory: bool
+    descriptor: int | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class _Publication:
     root_device: int
     root_inode: int
     entries: tuple[_PublishedEntry, ...]
+    root_descriptor: int | None = None
 
 
 _AT_FDCWD = -100
@@ -290,6 +292,7 @@ def initialize_registry_instance(
     warnings: tuple[str, ...] = ()
     published_valid = False
     primary_error: BootstrapError | None = None
+    ownership_cleanup_error = ""
     try:
         _render_instance(staging, project_name, selected_targets, identity)
         warnings = _validated_warnings(staging, label="Staged registry instance")
@@ -306,11 +309,24 @@ def initialize_registry_instance(
             if rollback_error:
                 primary_error = BootstrapError(f"{exc}; publication rollback also failed: {rollback_error}")
 
+    if publication is not None and published_valid:
+        ownership_cleanup_error = _close_publication_ownership_descriptors(publication)
+        publication = None
+
     cleanup_error = _remove_staging(staging)
     if primary_error is not None:
         if cleanup_error:
             primary_error = BootstrapError(f"{primary_error}; staging cleanup also failed: {cleanup_error}")
         raise primary_error
+
+    if ownership_cleanup_error:
+        message = (
+            f"Registry instance was created and validated at {destination}, but publication ownership handle "
+            f"cleanup failed: {ownership_cleanup_error}"
+        )
+        if cleanup_error:
+            message = f"{message}; staging cleanup also failed: {cleanup_error}"
+        raise BootstrapError(message)
 
     if cleanup_error:
         raise BootstrapError(
@@ -607,11 +623,12 @@ def _validated_warnings(root: Path, *, label: str) -> tuple[str, ...]:
 def _publish_staging(staging: Path, destination: Path, state: _DestinationState) -> _Publication:
     entries: list[_PublishedEntry] = []
     root_entries: list[_PublishedEntry] = []
+    existing_root_descriptor: int | None = None
     publication_directories = staging / ".publication-directories"
     try:
         publication_directories.mkdir(mode=0o700)
         if state.existed:
-            current, current_entries = _opened_directory_state(destination)
+            current, current_entries, existing_root_descriptor = _opened_directory_state(destination)
             if not stat.S_ISDIR(current.st_mode):
                 raise BootstrapError(f"Registry instance destination changed before publication: {destination}")
             if current.st_dev != state.device or current.st_ino != state.inode:
@@ -649,6 +666,7 @@ def _publish_staging(staging: Path, destination: Path, state: _DestinationState)
             state,
             root_entries,
             entries,
+            existing_root_descriptor,
         )
         rollback_error = _rollback_publication(publication)
         if rollback_error:
@@ -660,6 +678,7 @@ def _publish_staging(staging: Path, destination: Path, state: _DestinationState)
             state,
             root_entries,
             entries,
+            existing_root_descriptor,
         )
         rollback_error = _rollback_publication(publication)
         message = f"Could not publish registry instance to {destination}: {exc}"
@@ -667,7 +686,13 @@ def _publish_staging(staging: Path, destination: Path, state: _DestinationState)
             message = f"{message}; rollback also failed: {rollback_error}"
         raise BootstrapError(message) from exc
 
-    return _publication_from_partial(destination, state, root_entries, entries)
+    return _publication_from_partial(
+        destination,
+        state,
+        root_entries,
+        entries,
+        existing_root_descriptor,
+    )
 
 
 def _copy_file(source: BinaryIO, target: BinaryIO) -> None:
@@ -680,12 +705,18 @@ def _capture_open_file_entry(path: Path, target: BinaryIO) -> _PublishedEntry:
     metadata = os.fstat(target.fileno())
     if not stat.S_ISREG(metadata.st_mode):
         raise BootstrapError(f"Exclusive publication handle is not a regular file: {path}")
+    descriptor = _retain_ownership_descriptor(target.fileno())
     return _PublishedEntry(
         path=path,
         device=metadata.st_dev,
         inode=metadata.st_ino,
         is_directory=False,
+        descriptor=descriptor,
     )
+
+
+def _retain_ownership_descriptor(descriptor: int) -> int:
+    return os.dup(descriptor)
 
 
 def _publish_directory(
@@ -694,44 +725,61 @@ def _publish_directory(
     ownership_ledger: list[_PublishedEntry],
 ) -> _PublishedEntry:
     descriptor: int | None = None
+    retained_descriptor: int | None = None
     try:
         descriptor = os.open(source, _directory_open_flags())
         metadata = os.fstat(descriptor)
         if not stat.S_ISDIR(metadata.st_mode):
             raise BootstrapError(f"Staged publication entry is not a directory: {source}")
+        retained_descriptor = _retain_ownership_descriptor(descriptor)
         _rename_noreplace(source, destination)
         entry = _PublishedEntry(
             path=destination,
             device=metadata.st_dev,
             inode=metadata.st_ino,
             is_directory=True,
+            descriptor=retained_descriptor,
         )
         ownership_ledger.append(entry)
+        retained_descriptor = None
         published_metadata = _stat_published_path(destination)
         if published_metadata.st_dev != metadata.st_dev or published_metadata.st_ino != metadata.st_ino:
             raise BootstrapError(f"Registry publication directory changed during publication: {destination}")
         return entry
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        try:
+            if retained_descriptor is not None:
+                os.close(retained_descriptor)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _stat_published_path(path: Path) -> os.stat_result:
     return path.lstat()
 
 
-def _opened_directory_state(path: Path) -> tuple[os.stat_result, tuple[str, ...]]:
+def _opened_directory_state(path: Path) -> tuple[os.stat_result, tuple[str, ...], int]:
     descriptor: int | None = None
+    retained_descriptor: int | None = None
     try:
         descriptor = os.open(path, _directory_open_flags())
         metadata = os.fstat(descriptor)
         path_metadata = path.lstat()
         if path_metadata.st_dev != metadata.st_dev or path_metadata.st_ino != metadata.st_ino:
             raise BootstrapError(f"Registry instance destination changed before publication: {path}")
-        return metadata, tuple(os.listdir(descriptor))
+        entries = tuple(os.listdir(descriptor))
+        retained_descriptor = _retain_ownership_descriptor(descriptor)
+        result = (metadata, entries, retained_descriptor)
+        retained_descriptor = None
+        return result
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        try:
+            if retained_descriptor is not None:
+                os.close(retained_descriptor)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _directory_open_flags() -> int:
@@ -796,6 +844,7 @@ def _publication_from_partial(
     state: _DestinationState,
     root_entries: list[_PublishedEntry],
     entries: list[_PublishedEntry],
+    existing_root_descriptor: int | None,
 ) -> _Publication:
     root_entry = root_entries[0] if root_entries else None
     return _Publication(
@@ -812,17 +861,31 @@ def _publication_from_partial(
             else state.inode if state.inode is not None else -1
         ),
         entries=tuple(entries),
+        root_descriptor=(
+            root_entry.descriptor
+            if root_entry is not None
+            else existing_root_descriptor
+        ),
     )
 
 
 def _verify_publication(publication: _Publication, staging: Path) -> None:
     try:
+        root_owned = _retained_ownership_metadata(
+            _PublishedEntry(
+                path=publication.root,
+                device=publication.root_device,
+                inode=publication.root_inode,
+                is_directory=True,
+                descriptor=publication.root_descriptor,
+            )
+        )
         root_metadata = publication.root.lstat()
         if (
             not stat.S_ISDIR(root_metadata.st_mode)
             or stat.S_ISLNK(root_metadata.st_mode)
-            or root_metadata.st_dev != publication.root_device
-            or root_metadata.st_ino != publication.root_inode
+            or root_metadata.st_dev != root_owned.st_dev
+            or root_metadata.st_ino != root_owned.st_ino
         ):
             raise BootstrapError(f"Registry instance destination changed during publication: {publication.root}")
 
@@ -838,8 +901,9 @@ def _verify_publication(publication: _Publication, staging: Path) -> None:
             source = staging / relative_path
             target = publication.root / relative_path
             entry = entries_by_path[target]
+            owned = _retained_ownership_metadata(entry)
             metadata = target.lstat()
-            if metadata.st_dev != entry.device or metadata.st_ino != entry.inode:
+            if metadata.st_dev != owned.st_dev or metadata.st_ino != owned.st_ino:
                 raise BootstrapError(f"Registry publication entry changed during publication: {target}")
             if source.is_file() and target.read_bytes() != source.read_bytes():
                 raise BootstrapError(f"Registry publication entry changed during publication: {target}")
@@ -858,30 +922,36 @@ def _rollback_publication(publication: _Publication) -> str:
                 device=publication.root_device,
                 inode=publication.root_inode,
                 is_directory=True,
+                descriptor=publication.root_descriptor,
             )
         )
-    if not owned_entries:
-        return ""
-
-    try:
-        quarantine = Path(
-            tempfile.mkdtemp(
-                prefix=f".{publication.root.name}.skill-registry-rollback-",
-                dir=str(publication.root.parent),
-            )
-        )
-    except OSError as exc:
-        return f"could not create same-filesystem rollback quarantine beside {publication.root}: {exc}"
-
     errors: list[str] = []
-    for index, entry in enumerate(owned_entries):
-        quarantined_path = quarantine / f"entry-{index:04d}"
-        _rollback_entry(entry, quarantined_path, errors)
-
     try:
-        quarantine.rmdir()
-    except OSError as exc:
-        errors.append(f"rollback quarantine retained at {quarantine}: {exc}")
+        if owned_entries:
+            try:
+                quarantine = Path(
+                    tempfile.mkdtemp(
+                        prefix=f".{publication.root.name}.skill-registry-rollback-",
+                        dir=str(publication.root.parent),
+                    )
+                )
+            except OSError as exc:
+                errors.append(
+                    f"could not create same-filesystem rollback quarantine beside {publication.root}: {exc}"
+                )
+            else:
+                for index, entry in enumerate(owned_entries):
+                    quarantined_path = quarantine / f"entry-{index:04d}"
+                    _rollback_entry(entry, quarantined_path, errors)
+
+                try:
+                    quarantine.rmdir()
+                except OSError as exc:
+                    errors.append(f"rollback quarantine retained at {quarantine}: {exc}")
+    finally:
+        descriptor_cleanup_error = _close_publication_ownership_descriptors(publication)
+        if descriptor_cleanup_error:
+            errors.append(descriptor_cleanup_error)
     return "; ".join(errors)
 
 
@@ -904,7 +974,19 @@ def _rollback_entry(entry: _PublishedEntry, quarantined_path: Path, errors: list
         errors.append(message)
         return
 
-    if metadata.st_dev != entry.device or metadata.st_ino != entry.inode:
+    try:
+        owned = _retained_ownership_metadata(entry)
+    except BootstrapError as exc:
+        restoration_error = _restore_quarantined_path(quarantined_path, entry.path, metadata)
+        message = f"could not prove ownership of quarantined publication entry for {entry.path}: {exc}"
+        if restoration_error:
+            message = f"{message}; {restoration_error}"
+        else:
+            message = f"{message}; entry restored without overwrite"
+        errors.append(message)
+        return
+
+    if metadata.st_dev != owned.st_dev or metadata.st_ino != owned.st_ino:
         restoration_error = _restore_quarantined_path(quarantined_path, entry.path, metadata)
         message = f"refused to remove changed publication entry {entry.path}"
         if restoration_error:
@@ -927,6 +1009,41 @@ def _rollback_entry(entry: _PublishedEntry, quarantined_path: Path, errors: list
         else:
             message = f"{message}; entry restored without overwrite"
         errors.append(message)
+
+
+def _retained_ownership_metadata(entry: _PublishedEntry) -> os.stat_result:
+    if entry.descriptor is None:
+        raise BootstrapError(f"No retained ownership handle is available for {entry.path}.")
+    try:
+        metadata = os.fstat(entry.descriptor)
+    except OSError as exc:
+        raise BootstrapError(f"Could not inspect retained ownership handle for {entry.path}: {exc}") from exc
+
+    expected_type = stat.S_ISDIR if entry.is_directory else stat.S_ISREG
+    if not expected_type(metadata.st_mode):
+        kind = "directory" if entry.is_directory else "regular file"
+        raise BootstrapError(f"Retained ownership handle for {entry.path} is not a {kind}.")
+    if metadata.st_dev != entry.device or metadata.st_ino != entry.inode:
+        raise BootstrapError(f"Retained ownership handle identity changed for {entry.path}.")
+    return metadata
+
+
+def _close_publication_ownership_descriptors(publication: _Publication) -> str:
+    descriptors = {
+        descriptor
+        for descriptor in (
+            publication.root_descriptor,
+            *(entry.descriptor for entry in publication.entries),
+        )
+        if descriptor is not None
+    }
+    errors: list[str] = []
+    for descriptor in sorted(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            errors.append(f"could not close publication ownership handle {descriptor}: {exc}")
+    return "; ".join(errors)
 
 
 def _quarantine_public_path(source: Path, destination: Path) -> None:
