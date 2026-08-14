@@ -1,0 +1,106 @@
+name: Release candidate and PyPI publish
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build inspected distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.11.33"
+          enable-cache: true
+      - name: Synchronize locked dependencies
+        run: uv sync --frozen --python 3.14
+      - name: Validate release tag and package version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+              raise SystemExit(f"release tag must match vX.Y.Z: {tag!r}")
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit(f"release tag {tag!r} does not match package version {version!r}")
+          PY
+      - name: Check public source hygiene
+        run: uv run --frozen python scripts/check_public_hygiene.py --root .
+      - name: Run full unittest suite except artifact E2E
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          SKILL_REGISTRY_SKIP_ARTIFACT_E2E: "1"
+        run: uv run --frozen python -m unittest discover -s tests -v
+      - name: Build wheel and sdist once
+        run: uv build --wheel --sdist --out-dir dist
+      - name: Inspect wheel and sdist
+        run: >-
+          uv run --frozen python scripts/check_public_hygiene.py --root .
+          --artifact dist/skill_registry-0.1.0-py3-none-any.whl
+          --artifact dist/skill_registry-0.1.0.tar.gz
+      - name: Run installed-wheel artifact E2E
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          SKILL_REGISTRY_ARTIFACT_DIR: ${{ github.workspace }}/dist
+        run: >-
+          uv run --frozen python -m unittest discover -s tests
+          -p test_package_artifacts.py -v
+      - name: Upload inspected distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skill-registry-distributions
+          path: |
+            dist/skill_registry-0.1.0-py3-none-any.whl
+            dist/skill_registry-0.1.0.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish inspected distributions to PyPI
+    if: github.event_name == 'release'
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/skill-registry
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download inspected distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skill-registry-distributions
+          path: dist
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist

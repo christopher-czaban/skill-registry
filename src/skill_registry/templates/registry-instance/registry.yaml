@@ -1,0 +1,5 @@
+version: 1
+skills_dir: skills
+targets_dir: targets
+local_targets_dir: targets.local
+state_dir: .skill-registry

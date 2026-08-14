@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-registry"
+version = "0.1.0"
+description = "Git-backed registry and guardrails for shared agent skills."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Christopher Czaban" },
+]
+keywords = ["agents", "cli", "skills", "registry"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/christopher-czaban/skill-registry"
+Documentation = "https://github.com/christopher-czaban/skill-registry#readme"
+Issues = "https://github.com/christopher-czaban/skill-registry/issues"
+Source = "https://github.com/christopher-czaban/skill-registry"
+
+[project.scripts]
+skill-registry = "skill_registry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+skill_registry = [
+  "templates/registry-instance/.gitignore",
+  "templates/registry-instance/pyproject.toml",
+  "templates/registry-instance/registry.yaml",
+  "templates/registry-instance/runtime-dependencies.yaml",
+  "templates/registry-instance/runtimes.yaml",
+  "templates/registry-instance/skill-sets.yaml",
+]

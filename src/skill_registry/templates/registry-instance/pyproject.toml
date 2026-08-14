@@ -1,0 +1,11 @@
+[project]
+name = "{project_name}"
+version = "0.1.0"
+description = "User-owned Skill Registry instance."
+requires-python = ">=3.9"
+dependencies = [
+  "{engine_distribution}=={engine_version}",
+]
+
+[tool.uv]
+package = false

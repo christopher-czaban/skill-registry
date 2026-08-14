@@ -1,0 +1,5 @@
+.venv/
+.skill-registry/
+targets.local/
+__pycache__/
+*.py[cod]
