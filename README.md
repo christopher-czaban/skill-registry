@@ -15,7 +15,7 @@ do not need to clone the engine source.
 Create a registry instance with one or more generic target presets:
 
 ```sh
-uvx --from agent-skill-registry==0.1.0 skill-registry init ./my-agent-skills \
+uvx --from agent-skill-registry==0.2.0 skill-registry init ./my-agent-skills \
   --target codex \
   --target agents
 cd ./my-agent-skills
@@ -88,6 +88,30 @@ ownership evidence.
 
 Supported hosts are macOS, Linux, and WSL. Native Windows is not currently in
 scope.
+
+## Removing and retiring skills
+
+Remove one machine's registry-managed installation with explicit selectors:
+
+```sh
+uv run --frozen skill-registry undeploy --target codex --skill example-skill --dry-run
+uv run --frozen skill-registry undeploy --target codex --skill example-skill \
+  --reason "No longer needed on this target" --undeployed-by operator
+```
+
+Removal requires a valid deployment record. Unmanaged entries and locally
+changed copies are blocked. Backups and a local receipt under the target's
+`state_dir/undeployments/` preserve the entry, reason, actor and recovery evidence.
+Canonical files and other targets stay available. Repeated removal is a no-op.
+
+Set `lifecycle: retired` in `skills/<id>/skill.yaml` through a reviewed Git change
+to prohibit future installation while keeping the package. Retirement does not
+remove existing deployments; run `undeploy` on each participating machine.
+Reactivate through a separate reviewed `lifecycle: canonical` change. Engines
+older than 0.2.0 do not enforce retirement and must be upgraded first.
+
+See [Managed Undeployment And Retirement](docs/UNDEPLOY-AND-RETIREMENT.md) for
+ownership checks, status, backups, failure recovery and source-deletion ordering.
 
 See [Architecture](docs/ARCHITECTURE.md), [Contributing](CONTRIBUTING.md),
 [Security](SECURITY.md), and [Releasing](docs/RELEASING.md) for details.

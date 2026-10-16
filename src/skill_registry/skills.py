@@ -37,6 +37,7 @@ class SkillPackage:
     tool_wrappers: tuple[ToolWrapper, ...] = ()
     origin: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     origin_present: bool = False
+    lifecycle: str = "canonical"
 
 
 def list_registry_skills(config: RegistryConfig) -> tuple[SkillPackage, ...]:
@@ -67,6 +68,7 @@ def load_skill(path: Path) -> SkillPackage:
         tool_wrappers=_parse_tool_wrappers(data.get("tool_wrappers", [])),
         origin=_load_origin(data.get("origin"), path / "skill.yaml", present=origin_present),
         origin_present=origin_present,
+        lifecycle=str(data.get("lifecycle", "canonical")),
     )
 
 

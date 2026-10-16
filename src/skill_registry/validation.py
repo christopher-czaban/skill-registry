@@ -44,6 +44,9 @@ def validate_registry(config: RegistryConfig) -> ValidationResult:
     _validate_root_dirs(config, diagnostics)
     skills = _load_registry_skills(config, diagnostics)
     if skills is not None:
+        for skill in skills:
+            if skill.lifecycle not in {"canonical", "placeholder", "retired"}:
+                diagnostics.append(_error("invalid_skill_lifecycle", f"Skill {skill.id} has unsupported lifecycle: {skill.lifecycle}"))
         _validate_skill_origins(skills, diagnostics)
         _validate_skill_dependencies(skills, diagnostics)
         _validate_tool_wrappers(skills, diagnostics)
@@ -182,9 +185,12 @@ def _validate_skill_origins(skills: tuple[SkillPackage, ...], diagnostics: list[
 
 def _validate_skill_dependencies(skills: tuple[SkillPackage, ...], diagnostics: list[Diagnostic]) -> None:
     known_ids = {skill.id for skill in skills}
+    retired_ids = {skill.id for skill in skills if skill.lifecycle == "retired"}
     for skill in skills:
         seen: set[str] = set()
         for dependency in skill.skill_dependencies:
+            if skill.lifecycle != "retired" and dependency in retired_ids:
+                diagnostics.append(_error("retired_skill_dependency", f"Active skill {skill.id} depends on retired skill: {dependency}"))
             if not dependency:
                 diagnostics.append(_error("skill_dependency_missing_id", f"Skill {skill.id} has an empty skill dependency."))
                 continue
@@ -207,6 +213,7 @@ def _validate_skill_sets(
     diagnostics: list[Diagnostic],
 ) -> None:
     known_skill_ids = {skill.id for skill in skills}
+    retired_ids = {skill.id for skill in skills if skill.lifecycle == "retired"}
     known_target_names = set(config.target_by_name)
     seen_sets: set[str] = set()
 
@@ -224,6 +231,8 @@ def _validate_skill_sets(
 
         seen_members: set[str] = set()
         for member in skill_set.members:
+            if member in retired_ids:
+                diagnostics.append(_error("retired_skill_set_member", f"Skill set {label} references retired skill: {member}"))
             if not member:
                 diagnostics.append(_error("skill_set_member_missing_id", f"Skill set {label} has an empty member."))
                 continue

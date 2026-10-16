@@ -94,6 +94,8 @@ def plan_reconciliation(
 ) -> ReconcilePlan:
     target = config.target_by_name[target_name]
     skill = selected_skills(config, (skill_id,))[0]
+    if skill.lifecycle == "retired" and action == "replace":
+        raise ValueError("cannot install a retired skill through reconciliation")
     target_path = _resolve_target_skill_path(target, skill, source_path)
     existing_record = load_classification(target, skill.id)
     current = _current_classification(target, skill, existing_record, target_path)

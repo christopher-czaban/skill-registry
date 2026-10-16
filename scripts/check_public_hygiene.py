@@ -28,6 +28,7 @@ EXPECTED_FILES = frozenset(
         "SECURITY.md",
         "docs/ARCHITECTURE.md",
         "docs/RELEASING.md",
+        "docs/UNDEPLOY-AND-RETIREMENT.md",
         "pyproject.toml",
         "scripts/check_public_hygiene.py",
         "src/skill_registry/__init__.py",
@@ -48,6 +49,7 @@ EXPECTED_FILES = frozenset(
         "src/skill_registry/state.py",
         "src/skill_registry/status.py",
         "src/skill_registry/targets.py",
+        "src/skill_registry/undeploy.py",
         "src/skill_registry/templates/registry-instance/.gitignore",
         "src/skill_registry/templates/registry-instance/pyproject.toml",
         "src/skill_registry/templates/registry-instance/registry.yaml",
@@ -63,6 +65,7 @@ EXPECTED_FILES = frozenset(
         "tests/test_public_hygiene.py",
         "tests/test_registry_root.py",
         "tests/test_runtime_health.py",
+        "tests/test_undeploy.py",
         "uv.lock",
     }
 )
