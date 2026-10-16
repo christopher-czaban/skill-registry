@@ -29,6 +29,7 @@ from .root import RegistryRootError, resolve_registry_root
 from .skills import list_registry_skills
 from .status import check_status, status_ok
 from .targets import target_filter_errors
+from .undeploy import UndeployError, apply_undeploy, known_skill_ids, plan_undeploy, safe_skill_id
 from .validation import validate_registry
 
 
@@ -73,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_status(config, args, sys.stdout)
     if args.command == "deploy":
         return _cmd_deploy(config, args, sys.stdout)
+    if args.command == "undeploy":
+        return _cmd_undeploy(config, args, sys.stdout)
     if args.command == "export":
         return _cmd_export(config, args, sys.stdout)
     if args.command == "reconcile":
@@ -182,6 +185,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite a drifted registry-managed copy from the canonical package.",
     )
+
+    undeploy_parser = subcommands.add_parser("undeploy", help="Remove explicitly selected registry-managed local deployments.")
+    _add_json_option(undeploy_parser)
+    undeploy_parser.add_argument("--target", required=True, help="One registered local target.")
+    undeploy_parser.add_argument("--skill", action="append", required=True, help="Explicit skill ID. Repeatable.")
+    undeploy_parser.add_argument("--dry-run", action="store_true", help="Preview removal without writing.")
+    undeploy_parser.add_argument("--reason", default="", help="Required audit reason in apply mode.")
+    undeploy_parser.add_argument("--undeployed-by", default="skill-registry", help="Actor recorded in the local receipt.")
 
     export_parser = subcommands.add_parser("export", help="Export derived native target artifacts.")
     export_subcommands = export_parser.add_subparsers(dest="export_command")
@@ -407,7 +418,7 @@ def _cmd_doctor(config, args: argparse.Namespace, stdout: TextIO) -> int:
     validation = validate_registry(config)
     filter_errors = _runtime_filter_errors(config, args.runtime)
     filter_errors.extend(target_filter_errors(config, tuple(args.target)))
-    filter_errors.extend(_skill_filter_errors(config, tuple(args.skill)))
+    filter_errors.extend(_skill_filter_errors(config, tuple(args.skill), include_local=True))
     filters = ToolHealthFilters(tuple(args.runtime), tuple(args.skill), tuple(args.bin))
     results = () if validation.errors or filter_errors else check_tool_health(config, filters)
     deployment_statuses = () if validation.errors or filter_errors else check_status(config, tuple(args.target), tuple(args.skill))
@@ -465,7 +476,7 @@ def _cmd_discover(config, args: argparse.Namespace, stdout: TextIO) -> int:
 
 def _cmd_status(config, args: argparse.Namespace, stdout: TextIO) -> int:
     filter_errors = target_filter_errors(config, tuple(args.target))
-    filter_errors.extend(_skill_filter_errors(config, tuple(args.skill)))
+    filter_errors.extend(_skill_filter_errors(config, tuple(args.skill), include_local=True))
     if filter_errors:
         if args.json:
             _dump_json({"ok": False, "errors": filter_errors, "results": []}, stdout)
@@ -546,6 +557,48 @@ def _cmd_deploy(config, args: argparse.Namespace, stdout: TextIO) -> int:
     else:
         _print_deploy_plan(operations, stdout)
     return 0 if ok else 1
+
+
+def _cmd_undeploy(config, args: argparse.Namespace, stdout: TextIO) -> int:
+    errors = target_filter_errors(config, (args.target,))
+    errors.extend(f"Unsafe skill ID: {skill}" for skill in args.skill if not safe_skill_id(skill))
+    known = known_skill_ids(config)
+    errors.extend(f"Unknown skill: {skill}" for skill in args.skill if safe_skill_id(skill) and skill not in known)
+    if errors:
+        _dump_json({"ok": False, "errors": errors, "operations": []}, stdout) if args.json else print("error: " + "; ".join(errors), file=stdout)
+        return 3
+    if not args.dry_run and not args.reason.strip():
+        message = "undeploy apply requires --reason"
+        _dump_json({"ok": False, "error": message, "operations": []}, stdout) if args.json else print(f"error: {message}", file=stdout)
+        return 2
+    try:
+        if args.dry_run:
+            operations = plan_undeploy(config, target_name=args.target, skill_ids=tuple(args.skill))
+        else:
+            operations = apply_undeploy(config, target_name=args.target, skill_ids=tuple(args.skill),
+                                       reason=args.reason, undeployed_by=args.undeployed_by)
+        ok = all(item.ok for item in operations)
+        if args.json:
+            _dump_json({"ok": ok, "dry_run": args.dry_run, "operations": [asdict(item) for item in operations]}, stdout)
+        else:
+            print("Undeploy dry-run:" if args.dry_run else "Undeploy apply:", file=stdout)
+            for item in operations:
+                print(f"  {item.operation} {item.skill_id} -> {item.target}: {item.reason}", file=stdout)
+                print(f"    target: {item.target_path}", file=stdout)
+                if item.backup_path:
+                    print(f"    backup: {item.backup_path}", file=stdout)
+                    print(f"    receipt: {item.receipt_path}", file=stdout)
+        return 0 if ok else 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        completed = exc.completed if isinstance(exc, UndeployError) else ()
+        if args.json:
+            _dump_json({"ok": False, "dry_run": args.dry_run, "error": str(exc),
+                        "operations": [asdict(item) for item in completed]}, stdout)
+        else:
+            print(f"error: {exc}", file=stdout)
+            for item in completed:
+                print(f"  completed: {item.operation} {item.skill_id} -> {item.target}", file=stdout)
+        return 1
 
 
 def _cmd_export(config, args: argparse.Namespace, stdout: TextIO) -> int:
@@ -1026,6 +1079,6 @@ def _runtime_filter_errors(config, runtime_filters: list[str]) -> list[str]:
     return [f"Unknown runtime profile: {name}" for name in runtime_filters if name not in known]
 
 
-def _skill_filter_errors(config, skill_filters: tuple[str, ...]) -> list[str]:
-    known = {skill.id for skill in list_registry_skills(config)}
+def _skill_filter_errors(config, skill_filters: tuple[str, ...], *, include_local: bool = False) -> list[str]:
+    known = known_skill_ids(config) if include_local else {skill.id for skill in list_registry_skills(config)}
     return [f"Unknown skill: {skill_id}" for skill_id in skill_filters if skill_id not in known]

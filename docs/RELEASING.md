@@ -1,15 +1,15 @@
 # Releasing
 
-Version `0.1.0` must be published as the `agent-skill-registry` distribution from
+Version `0.2.0` is published as the `agent-skill-registry` distribution from
 the `christopher-czaban/skill-registry` repository. It installs the
 `skill_registry` Python package and the sole CLI command `skill-registry`.
 
 The expected distribution files are
-`agent_skill_registry-0.1.0-py3-none-any.whl` and
-`agent_skill_registry-0.1.0.tar.gz`. A clean, exactly pinned bootstrap uses:
+`agent_skill_registry-0.2.0-py3-none-any.whl` and
+`agent_skill_registry-0.2.0.tar.gz`. A clean, exactly pinned bootstrap uses:
 
 ```sh
-uvx --from agent-skill-registry==0.1.0 skill-registry init ./my-agent-skills
+uvx --from agent-skill-registry==0.2.0 skill-registry init ./my-agent-skills
 ```
 
 ## Candidate procedure

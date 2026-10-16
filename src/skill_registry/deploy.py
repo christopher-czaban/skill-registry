@@ -23,6 +23,7 @@ from .state import (
 )
 from .status import check_recorded_directory_health
 from .targets import selected_targets
+from .undeploy import pending_path, read_receipt
 
 
 @dataclass(frozen=True)
@@ -92,9 +93,33 @@ def plan_deploy(
 
     for target in targets:
         for skill in skills:
+            if skill.lifecycle == "retired" and not skill_ids:
+                continue
             if not _skill_applies_to_target(skill, target):
                 continue
             effective_mode = _effective_mode(mode, target)
+            if pending_path(target, skill.id).exists() or pending_path(target, skill.id).is_symlink():
+                operations.append(_operation(target, skill, effective_mode, "block", str(target.root_path / skill.id),
+                                             "pending undeployment needs recovery before deployment"))
+                continue
+            try:
+                intentionally_removed = (not skill_ids and not load_deployment_record(target, skill.id)
+                                         and read_receipt(config, target, skill.id))
+            except (OSError, ValueError, RuntimeError) as exc:
+                operations.append(_operation(target, skill, effective_mode, "block", str(target.root_path / skill.id), str(exc)))
+                continue
+            if intentionally_removed:
+                entry = target.root_path / skill.id
+                recreated = entry.exists() or entry.is_symlink()
+                operations.append(_operation(target, skill, effective_mode, "block" if recreated else "skip", str(entry),
+                                             "undeployed entry was recreated without ownership" if recreated else
+                                             "intentionally undeployed; select this skill explicitly to reinstall"))
+                continue
+            dependencies = {s.id: s for s in selected_skills(config, skill.skill_dependencies)} if skill.skill_dependencies else {}
+            if any(s.lifecycle == "retired" for s in dependencies.values()):
+                operations.append(_operation(target, skill, effective_mode, "block", str(target.root_path / skill.id),
+                                             "active skill depends on a retired skill"))
+                continue
             operations.append(
                 _plan_target_skill(
                     target,
@@ -204,6 +229,12 @@ def _plan_target_skill(
     replace_managed: bool,
     replace_drifted_copy: bool,
 ) -> DeployPlanOperation:
+    if pending_path(target, skill.id).exists() or pending_path(target, skill.id).is_symlink():
+        return _operation(target, skill, mode, "block", str(target.root_path / skill.id),
+                          "pending undeployment needs recovery before deployment")
+    if skill.lifecycle not in {"canonical", "placeholder"}:
+        return _operation(target, skill, mode, "block", str(target.root_path / skill.id),
+                          "skill is retired or has an unsupported lifecycle; reactivate through reviewed metadata")
     root = target.root_path
     target_path = root / skill.id
     record = load_classification(target, skill.id)

@@ -5,7 +5,8 @@ from pathlib import Path
 
 from .config import RegistryConfig, TargetConfig
 from .hashing import PayloadHashError, deployable_payload_hash
-from .skills import SkillPackage, selected_skills
+from .skills import SkillPackage, list_registry_skills
+from .undeploy import local_skill_ids, pending_path, read_receipt
 from .state import (
     DeploymentRecordError,
     deployment_record_validation_error,
@@ -14,7 +15,7 @@ from .state import (
 )
 from .targets import selected_targets
 
-HEALTHY_STATUSES = {"in_sync", "not_applicable", "local_only"}
+HEALTHY_STATUSES = {"in_sync", "not_applicable", "local_only", "retired", "undeployed"}
 
 
 @dataclass(frozen=True)
@@ -46,13 +47,41 @@ def check_status(
 ) -> tuple[DeploymentStatus, ...]:
     statuses: list[DeploymentStatus] = []
     targets = selected_targets(config, target_names)
-    skills = selected_skills(config, skill_ids)
+    skills = {skill.id: skill for skill in list_registry_skills(config)}
 
     for target in targets:
-        for skill in skills:
-            if not _skill_applies_to_target(skill, target):
+        recorded_ids = local_skill_ids(target)
+        ids = set(skill_ids) if skill_ids else set(skills) | recorded_ids
+        for skill_id in sorted(ids):
+            skill = skills.get(skill_id) or SkillPackage(skill_id, (config.skills_dir / skill_id).resolve(strict=False))
+            if not _skill_applies_to_target(skill, target) and skill_id not in recorded_ids:
                 continue
-            statuses.append(_check_target_skill(target, skill))
+            entry = target.root_path / skill.id
+            try:
+                if pending_path(target, skill.id).exists() or pending_path(target, skill.id).is_symlink():
+                    raise ValueError(f"pending undeployment needs recovery: {pending_path(target, skill.id)}")
+                active = load_deployment_record(target, skill.id)
+                if active is None:
+                    receipt = read_receipt(config, target, skill.id)
+                    if receipt:
+                        if entry.exists() or entry.is_symlink():
+                            raise ValueError("undeployed entry was recreated without a deployment record")
+                        statuses.append(_status(target, skill, "undeployed", str(entry), receipt["reason"], receipt["deployment_mode"]))
+                        continue
+                    if skill.lifecycle == "retired" and not entry.exists() and not entry.is_symlink():
+                        statuses.append(_status(target, skill, "retired", str(entry), "retired skill is not installed"))
+                        continue
+                if skill_id not in skills and active is not None:
+                    statuses.append(_status(target, skill, "orphaned", str(entry),
+                                            "canonical source is absent; use record-proven undeploy"))
+                    continue
+                result = _check_target_skill(target, skill)
+                if skill.lifecycle == "retired" and result.status in {"in_sync", "stale"}:
+                    result = _status(target, skill, "retired_deployed", str(entry),
+                                     "retired skill is still installed; use undeploy", result.deploy_mode)
+                statuses.append(result)
+            except (OSError, ValueError, RuntimeError) as exc:
+                statuses.append(_status(target, skill, "blocked", str(entry), str(exc)))
     return tuple(statuses)
 
 

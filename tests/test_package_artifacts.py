@@ -72,8 +72,8 @@ class PackageArtifactTests(unittest.TestCase):
         cls._temporary.cleanup()
 
     def test_artifact_names_metadata_and_console_script_match_distribution_contract(self) -> None:
-        self.assertEqual(self.wheel.name, "agent_skill_registry-0.1.0-py3-none-any.whl")
-        self.assertEqual(self.sdist.name, "agent_skill_registry-0.1.0.tar.gz")
+        self.assertEqual(self.wheel.name, "agent_skill_registry-0.2.0-py3-none-any.whl")
+        self.assertEqual(self.sdist.name, "agent_skill_registry-0.2.0.tar.gz")
 
         with zipfile.ZipFile(self.wheel) as archive:
             metadata_members = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
@@ -87,7 +87,7 @@ class PackageArtifactTests(unittest.TestCase):
             entry_points.read_string(archive.read(entry_point_members[0]).decode("utf-8"))
 
         self.assertEqual(metadata["Name"], "agent-skill-registry")
-        self.assertEqual(metadata["Version"], "0.1.0")
+        self.assertEqual(metadata["Version"], "0.2.0")
         self.assertEqual(metadata["Requires-Python"], ">=3.9")
         self.assertEqual(
             set(metadata.get_all("Project-URL", [])),
@@ -183,9 +183,9 @@ class PackageArtifactTests(unittest.TestCase):
         init_payload = json.loads(init.stdout)
         self.assertTrue(init_payload["ok"])
         self.assertEqual(init_payload["engine_distribution"], "agent-skill-registry")
-        self.assertEqual(init_payload["engine_version"], "0.1.0")
+        self.assertEqual(init_payload["engine_version"], "0.2.0")
         self.assertIn(
-            '"agent-skill-registry==0.1.0"',
+            '"agent-skill-registry==0.2.0"',
             (generated / "pyproject.toml").read_text(encoding="utf-8"),
         )
         assert_no_development_source(generated)
@@ -306,6 +306,31 @@ class PackageArtifactTests(unittest.TestCase):
         )
         self.assertEqual(guard.returncode, 0, guard.stderr + guard.stdout)
         self.assertEqual(json.loads(guard.stdout)["decision"], "allow")
+
+        def installed_command(*arguments: str):
+            return subprocess.run(
+                ["uv", "run", "--frozen", "skill-registry", "--json", *arguments],
+                cwd=runner, env=environment, text=True, capture_output=True,
+                check=False, timeout=180,
+            )
+
+        installed = installed_command("deploy", "--target", "codex", "--skill", "example-skill",
+                                      "--reason", "installed-wheel smoke")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        preview = installed_command("undeploy", "--target", "codex", "--skill", "example-skill", "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        metadata_path = skill_dir / "skill.yaml"
+        metadata_path.write_text(metadata_path.read_text(encoding="utf-8") + "lifecycle: retired\n", encoding="utf-8")
+        prohibited = installed_command("deploy", "--target", "codex", "--skill", "example-skill", "--dry-run")
+        self.assertEqual(prohibited.returncode, 1, prohibited.stdout + prohibited.stderr)
+        removed = installed_command("undeploy", "--target", "codex", "--skill", "example-skill",
+                                    "--reason", "retired installed-wheel smoke")
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["operations"][0]["receipt_path"])
+        final_status = installed_command("status", "--target", "codex", "--skill", "example-skill")
+        self.assertEqual(final_status.returncode, 0, final_status.stdout + final_status.stderr)
+        self.assertEqual(json.loads(final_status.stdout)["results"][0]["status"], "undeployed")
+        self.assertTrue((skill_dir / "SKILL.md").is_file())
 
         installation = subprocess.run(
             [

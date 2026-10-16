@@ -182,6 +182,9 @@ def _validate_export(config: RegistryConfig, *, skill_set_id: str, target_name: 
     missing = tuple(member for member in skill_set.members if member not in skill_by_id)
     if missing:
         return f"Unknown skill-set member(s): {', '.join(missing)}"
+    retired = tuple(member for member in skill_set.members if skill_by_id[member].lifecycle == "retired")
+    if retired:
+        return f"Retired skill-set member(s) cannot be exported: {', '.join(retired)}"
 
     not_applicable = tuple(
         member for member in skill_set.members if not _skill_applies_to_target(skill_by_id[member], target)

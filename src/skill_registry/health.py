@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import BinDependency, EnvDependency, RegistryConfig, RuntimeProfile
-from .skills import SkillPackage, ToolWrapper, selected_skills
+from .skills import SkillPackage, ToolWrapper, list_registry_skills, selected_skills
 
 FAILURE_STATUSES = {
     "missing",
@@ -48,7 +48,9 @@ class ProbeResult:
 def check_tool_health(config: RegistryConfig, filters: ToolHealthFilters) -> tuple[ProbeResult, ...]:
     results: list[ProbeResult] = []
     runtimes = _selected_runtimes(config, filters)
-    skills = selected_skills(config, filters.skills)
+    skills = tuple(skill for skill in selected_skills(config, filters.skills) if skill.lifecycle != "retired")
+    if filters.skills and not skills:
+        return ()
 
     for runtime in runtimes:
         wrappers = _selected_tool_wrappers(skills, filters)
@@ -84,6 +86,7 @@ def _selected_bin_dependencies(
         dependency
         for dependency in config.runtime_dependencies.bins
         if _dependency_applies_to_runtime(dependency.target_runtimes, runtime.name)
+        and not _retired_only_dependency(config, dependency.required_by_skills)
         and _dependency_applies_to_skill(dependency.required_by_skills, filters.skills)
         and _dependency_applies_to_bin(dependency.name, filters.bins)
         and not _is_wrapper_managed_dependency(dependency, skills)
@@ -142,6 +145,11 @@ def _selected_env_dependencies(
 
 def _dependency_applies_to_runtime(target_runtimes: tuple[str, ...], runtime_name: str) -> bool:
     return not target_runtimes or runtime_name in target_runtimes
+
+
+def _retired_only_dependency(config: RegistryConfig, skill_ids: tuple[str, ...]) -> bool:
+    retired_ids = {skill.id for skill in list_registry_skills(config) if skill.lifecycle == "retired"}
+    return bool(skill_ids) and set(skill_ids).issubset(retired_ids)
 
 
 def _dependency_applies_to_skill(required_by_skills: tuple[str, ...], selected_skills: tuple[str, ...]) -> bool:
